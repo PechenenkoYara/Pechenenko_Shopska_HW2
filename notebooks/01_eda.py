@@ -18,7 +18,8 @@ print('categories:', coco['train']['categories'])
 print('image example:', coco['train']['images'][0])
 print('ann example:', coco['train']['annotations'][0])
 print('crowd category ids:', {a['category_id'] for a in coco['train']['annotations'] if a.get('iscrowd', 0)})
-display(pd.read_csv(f'{ROOT}/test_images.csv').head(3), pd.read_csv(f'{ROOT}/sample_submission.csv').head(3))
+display(pd.read_csv(f'{ROOT}/test_images.csv').head(3))
+print('sample submission:', SAMPLE_SUB)
 print('test frames matched on disk:', len(test_paths()))
 
 # %% Tables: one row per image, one row per annotation
@@ -48,8 +49,9 @@ summary['ignored_regions'] = ign.groupby('split').size()
 display(summary)
 
 # %% Resolutions per split (train / val / test)
-res = ims.assign(res=ims.width.astype(str) + 'x' + ims.height.astype(str)).groupby(['split', 'res']).clip.nunique()
-display(res.unstack(0).fillna(0).astype(int).assign(test_frames=test_sizes.rename(lambda s: f'{s[0]}x{s[1]}')))
+res = ims.assign(res=ims.width.astype(str) + 'x' + ims.height.astype(str)).groupby(['split', 'res'])['clip'].nunique()
+display(pd.concat([res.unstack(0), test_sizes.rename(lambda s: f'{s[0]}x{s[1]}').rename('test_frames')], axis=1)
+        .fillna(0).astype(int).sort_index())
 
 # %% Class distribution (instances and unique tracks) train vs val
 cnt = obj.groupby(['cls', 'split']).size().unstack()
@@ -117,7 +119,7 @@ def ignored_fraction(g):
     for x, y, w, h in g[['x', 'y', 'w', 'h']].values // 4:
         m[int(y):int(y + h) + 1, int(x):int(x + w) + 1] = True
     return m.mean()
-ign_frac = ign.groupby(['split', 'clip', 'image_id']).apply(ignored_fraction).groupby(['split', 'clip']).mean()
+ign_frac = ign.groupby(['split', 'clip', 'image_id'])[['x', 'y', 'w', 'h', 'width', 'height']].apply(ignored_fraction).groupby(['split', 'clip']).mean()
 clip_stats['ignored_area'] = ign_frac.reindex(clip_stats.index).fillna(0).round(3)
 clip_stats['frames_with_ignore'] = (ign.groupby(['split', 'clip']).image_id.nunique() / clip_stats.frames).fillna(0).round(2)
 display(clip_stats.sort_values('objs_per_frame', ascending=False))
@@ -146,12 +148,14 @@ def show_gt(ax, img_row, crop=None):
         else:
             ax.add_patch(patches.Rectangle((r.x, r.y), r.w, r.h, fill=False, lw=.8, ec=COLORS[cat2cls[r.category_id]]))
     if crop: ax.set_xlim(crop[0], crop[2]); ax.set_ylim(crop[3], crop[1])
-    ax.set_title(f'{img_row.clip} ({len(a)} boxes)', fontsize=8)
+    ax.set_title(f"{img_row['clip']} ({len(a)} boxes)", fontsize=8)
 
 dense = clip_stats.objs_per_frame.idxmax(); sparse = clip_stats.objs_per_frame.idxmin()
 small = clip_stats.median_size.idxmin(); with_ign = clip_stats.ignored_area.idxmax()
-picks = [ims[(ims.split == s) & (ims.clip == c)].iloc[len(ims[(ims.split == s) & (ims.clip == c)]) // 2]
-         for s, c in [dense, sparse, small, with_ign]]
+def mid_frame(s, c):                                         # ims['clip'], not ims.clip (= DataFrame.clip method)
+    f = ims[(ims.split == s) & (ims['clip'] == c)]
+    return f.iloc[len(f) // 2]
+picks = [mid_frame(*sc) for sc in [dense, sparse, small, with_ign]]
 fig, axs = plt.subplots(2, 2, figsize=(16, 10))
 for ax, r in zip(axs.flat, picks): show_gt(ax, r)
 fig.legend(handles=[patches.Patch(color=COLORS[i], label=c) for i, c in enumerate(CLASSES)] +
@@ -169,7 +173,7 @@ r = picks[3]
 img = np.array(Image.open(f'{ROOT}/{r.split}/images/{key(r.file_name)}'))
 for x, y, w, h in ign.loc[(ign.image_id == r.id) & (ign.split == r.split), ['x', 'y', 'w', 'h']].values.astype(int):
     img[y:y + h, x:x + w] = 114
-plt.figure(figsize=(10, 6)); plt.imshow(img); plt.axis('off'); plt.title(f'{r.clip}: ignored regions masked')
+plt.figure(figsize=(10, 6)); plt.imshow(img); plt.axis('off'); plt.title(f"{r['clip']}: ignored regions masked")
 save('ignore_masking')
 
 # %% Anchor candidates for RetinaNet: k-means (IoU distance, YOLOv2-style) on train boxes at the 1280 scale

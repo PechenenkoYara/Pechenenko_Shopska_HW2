@@ -15,13 +15,15 @@ def seed_everything(seed=SEED):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 seed_everything()
 
-# Competition data root = folder that contains sample_submission.csv (works for any /kaggle/input layout)
-_hits = glob.glob('/kaggle/input/**/sample_submission.csv', recursive=True)
-assert _hits, 'Competition data not found: add it via "Add Input"'
-ROOT = os.path.dirname(_hits[0])
+# Competition data root = folder with train/ and val/ (works for any /kaggle/input layout)
+_hits = [os.path.dirname(os.path.dirname(p)) for p in glob.glob('/kaggle/input/**/train/images', recursive=True)
+         if os.path.isdir(p.replace('/train/images', '/val/images'))]
+assert _hits, 'Competition data not found: add it via "Add Input"; see `!find /kaggle/input -maxdepth 3`'
+ROOT = _hits[0]
+SAMPLE_SUB = (glob.glob(f'{ROOT}/sample_submission.csv') + glob.glob(f'{ROOT}/*ubmission*.csv') + [None])[0]
 WORK = '/kaggle/working'
 CLASSES = ['person', 'bicycle', 'car', 'van', 'truck', 'tricycle', 'bus', 'motor']
-print('ROOT =', ROOT)
+print('ROOT =', ROOT, '| files:', sorted(os.listdir(ROOT)))
 
 
 def key(path):
@@ -114,7 +116,7 @@ def test_paths():
     return _test_table().path.tolist()
 
 
-# %% Submission writer (order = sample_submission.csv)
+# %% Submission writer (row order = sample_submission.csv if provided, else test_images.csv)
 def write_submission(preds, out=f'{WORK}/submission.csv'):
     test = _test_table()
     key2id = dict(zip(test.path.map(key), test.image_id))
@@ -122,7 +124,7 @@ def write_submission(preds, out=f'{WORK}/submission.csv'):
     for p, dets in preds.items():
         dets = sorted(dets, key=lambda d: -d[1])[:500]
         strings[key2id[key(p)]] = ' '.join(f'{c} {s:.4f} {x:.1f} {y:.1f} {w:.1f} {h:.1f}' for c, s, x, y, w, h in dets)
-    sub = pd.read_csv(f'{ROOT}/sample_submission.csv')
+    sub = pd.read_csv(SAMPLE_SUB)[['image_id']] if SAMPLE_SUB else test[['image_id']].copy()
     assert set(sub.image_id) == set(test.image_id), 'sample_submission and test_images ids differ'
     sub['PredictionString'] = sub.image_id.map(strings).fillna('')
     sub.to_csv(out, index=False)
