@@ -215,3 +215,32 @@ for col, desc in cases:
 print('per-class AP:\n', per_class.to_string(index=False))
 print('\nerrors at threshold', THR, ':\n', errors.to_string())
 print('\nrecall by size:\n', GT.groupby(size_bins, observed=True).found.mean().round(3).to_string())
+
+# %% Extra cases: the worst clip and the rarest class (bus)
+worst = per_clip.recall.idxmin()
+k = GT[GT.frame.map(clip_of) == worst].groupby('frame').size().idxmax()
+show_case(k, f'{k}: worst clip (recall {per_clip.recall.min():.3f})', 'frcnn_case_worst_clip.png', 'missed')
+
+bus = GT[GT.cls == CLASSES.index('bus')]
+print('bus boxes per clip:\n', bus.frame.map(clip_of).value_counts().to_string())
+print('unique buses in val (track ids):', len({a.get('track_id') for a in ds['annotations']
+      if not a.get('iscrowd', 0) and cat2cls[a['category_id']] == CLASSES.index('bus')}))
+k = bus.groupby('frame').size().idxmax()
+show_case(k, f'{k}: frame with most buses', 'frcnn_case_bus.png', 'missed')
+
+# %% Is the "sparse frames are hard" effect just the worst clip? (recall by density without it)
+other = GT[GT.frame.map(clip_of) != worst]
+print(other.groupby(pd.cut(other.n_in_frame, [0, 25, 50, 100, 200, 1e4]), observed=True).found.agg(['mean', 'size']))
+
+# %% Masking experiment check: how many labeled train objects overlap an ignored region (painted gray when MASK_IGNORE)?
+ds_tr = json.load(open(f'{ROOT}/train/annotations_coco.json'))
+objs_tr, ign_tr = defaultdict(list), defaultdict(set)
+for a in ds_tr['annotations']:
+    if a.get('iscrowd', 0):
+        ign_tr[a['image_id']].add(tuple(a['bbox']))      # each region is duplicated for 8 classes in the json
+    else:
+        objs_tr[a['image_id']].append(a['bbox'])
+cov = np.concatenate([iou_matrix(objs_tr[i], list(ign_tr[i]), ioa=True).max(1) for i in objs_tr if ign_tr.get(i)])
+n_all = sum(len(v) for v in objs_tr.values())
+print(f'objects partly covered by an ignored region: {(cov > 0).sum() / n_all:.2%}, '
+      f'more than half covered: {(cov > 0.5).sum() / n_all:.2%}')
