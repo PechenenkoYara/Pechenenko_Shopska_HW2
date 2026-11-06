@@ -8,7 +8,7 @@
 
 # %%
 !pip -q install ultralytics pycocotools
-import pickle, time
+import pickle, shutil, time, zipfile
 import cv2
 from ultralytics import YOLO
 
@@ -18,10 +18,27 @@ TILE_FRAC = 0.6       # tile side = 60% of the frame side, 2x2 grid -> 20% overl
 NMS_IOU = 0.6
 MAX_DET = 500
 VAL_STRIDE = 50 if DEBUG else 1
+RUN_BASE = False      # True: full val table + submission (done: sahi_2x2 val 0.2032, public 0.16733)
+SIM_STRIDE = 100 if DEBUG else 5   # val frames for the resolution check
+SIM_SIDES = [680, 960, 1360, 1920] # long sides that exist in test; val has none below 1344
+SAHI_MIN_SIDE = None  # set after the resolution table: SAHI only for test frames with long side >= this
 
-ckpt = glob.glob('/kaggle/input/**/best.pt', recursive=True)
-assert ckpt, 'best.pt not found: add the dataset with weights via "Add Input"'
-model = YOLO(ckpt[0])
+def find_weights():
+    """Path to best.pt. A .pt file is a zip archive and Kaggle unpacks it on upload -> pack the folder back."""
+    hits = glob.glob('/kaggle/input/**/best.pt', recursive=True)
+    if hits:
+        return hits[0]
+    pkl = glob.glob('/kaggle/input/**/best/data.pkl', recursive=True)
+    assert pkl, 'best.pt not found: add the dataset with weights via "Add Input"'
+    src, out = os.path.dirname(pkl[0]), f'{WORK}/best.pt'
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
+        for folder, _, files in os.walk(src):
+            for f in files:
+                p = os.path.join(folder, f)
+                z.write(p, os.path.join('best', os.path.relpath(p, src)))
+    return out
+
+model = YOLO(find_weights())
 half = torch.cuda.is_available()
 
 # %% TTA (Ultralytics): flips and scales inside model.predict
@@ -108,22 +125,66 @@ EXPERIMENTS = {
     'tta': predict_tta,
     'sahi_2x2': predict_sahi,
 }
-val_frames = frame_paths('val', VAL_STRIDE)
-rows = []
-for name, fn in EXPERIMENTS.items():
-    t = time.time()
-    preds = fn(val_frames)
-    ms = (time.time() - t) / len(val_frames) * 1000
-    pickle.dump(preds, open(f'{WORK}/val_preds_{name}.pkl', 'wb'))     # kept for WBF
-    rows.append({'exp': name, **coco_eval(preds, verbose=False), 'ms_per_frame': round(ms, 1)})
-    table = pd.DataFrame(rows)
-    table.to_csv(f'{WORK}/inference_experiments.csv', index=False)     # saved after each one
-display(table)
+if RUN_BASE:
+    val_frames = frame_paths('val', VAL_STRIDE)
+    rows = []
+    for name, fn in EXPERIMENTS.items():
+        t = time.time()
+        preds = fn(val_frames)
+        ms = (time.time() - t) / len(val_frames) * 1000
+        pickle.dump(preds, open(f'{WORK}/val_preds_{name}.pkl', 'wb'))     # kept for WBF
+        rows.append({'exp': name, **coco_eval(preds, verbose=False), 'ms_per_frame': round(ms, 1)})
+        table = pd.DataFrame(rows)
+        table.to_csv(f'{WORK}/inference_experiments.csv', index=False)     # saved after each one
+    display(table)
 
-# %% Test predictions for the experiment with the best val mAP
-SUBMIT = table.sort_values('mAP').exp.iloc[-1]
-print('submitting:', SUBMIT)
-tp = test_paths()
-test_preds = EXPERIMENTS[SUBMIT](tp[:8] if DEBUG else tp)
-pickle.dump(test_preds, open(f'{WORK}/test_preds_{SUBMIT}.pkl', 'wb'))
-write_submission(test_preds)
+# %% Test predictions for the experiment with the best val mAP (changed: see resolution check below)
+if RUN_BASE:
+    SUBMIT = table.sort_values('mAP').exp.iloc[-1]
+    print('submitting:', SUBMIT)
+    tp = test_paths()
+    test_preds = EXPERIMENTS[SUBMIT](tp[:8] if DEBUG else tp)
+    pickle.dump(test_preds, open(f'{WORK}/test_preds_{SUBMIT}.pkl', 'wb'))
+    write_submission(test_preds)
+
+
+# %% Resolution check: val has 3 of 7 clips with long side >= 2688, test has none and has frames down to 680x382.
+# Downscale val frames to the test long sides, predict, map boxes back to the original val coordinates.
+def downscaled_val(side, stride=SIM_STRIDE):
+    """Copies of val frames with long side <= `side`. Returns {copy_path: factor back to original pixels}."""
+    out = {}
+    for p in frame_paths('val', stride):
+        im = cv2.imread(p)
+        s = min(1.0, side / max(im.shape[:2]))
+        q = f'{WORK}/val_sim/{side}/{key(p)}'
+        os.makedirs(os.path.dirname(q), exist_ok=True)
+        if s < 1:
+            im = cv2.resize(im, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        cv2.imwrite(q, im, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        out[q] = 1 / s
+    return out
+
+
+rows = []
+for side in SIM_SIDES:
+    factors = downscaled_val(side)
+    for name in ['nms_0.6', 'sahi_2x2']:
+        preds = EXPERIMENTS[name](list(factors))
+        preds = {q: [(c, s, x * factors[q], y * factors[q], w * factors[q], h * factors[q]) for c, s, x, y, w, h in dets]
+                 for q, dets in preds.items()}
+        rows.append({'side': side, 'exp': name, **coco_eval(preds, verbose=False)})
+        sim_table = pd.DataFrame(rows)
+        sim_table.to_csv(f'{WORK}/resolution_check.csv', index=False)
+    shutil.rmtree(f'{WORK}/val_sim/{side}')
+shutil.rmtree(f'{WORK}/val_sim')
+display(sim_table.pivot(index='side', columns='exp', values=['mAP', 'AP50', 'AP_small']))
+
+# %% Submission with SAHI only on large frames (test_images.csv has width/height)
+if SAHI_MIN_SIDE:
+    test = _test_table()
+    test = test.head(8) if DEBUG else test
+    big = test.width.clip(lower=test.height) >= SAHI_MIN_SIDE
+    print('SAHI frames:', int(big.sum()), '| plain frames:', int((~big).sum()))
+    test_preds = {**EXPERIMENTS['nms_0.6'](test.path[~big].tolist()), **EXPERIMENTS['sahi_2x2'](test.path[big].tolist())}
+    pickle.dump(test_preds, open(f'{WORK}/test_preds_sahi_min{SAHI_MIN_SIDE}.pkl', 'wb'))
+    write_submission(test_preds)
