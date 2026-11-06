@@ -19,6 +19,8 @@ NMS_IOU = 0.6
 MAX_DET = 500
 VAL_STRIDE = 50 if DEBUG else 1
 RUN_BASE = False      # True: full val table + submission (done: sahi_2x2 val 0.2032, public 0.16733)
+RUN_SIM = False       # True: resolution check (done: SAHI wins mAP at all four sides)
+RUN_EXPORT = True     # True: val + test predictions of each method for WBF, FPS
 SIM_STRIDE = 100 if DEBUG else 5   # val frames for the resolution check
 SIM_SIDES = [680, 960, 1360, 1920] # long sides that exist in test; val has none below 1344
 SAHI_MIN_SIDE = None  # set after the resolution table: SAHI only for test frames with long side >= this
@@ -165,19 +167,20 @@ def downscaled_val(side, stride=SIM_STRIDE):
     return out
 
 
-rows = []
-for side in SIM_SIDES:
-    factors = downscaled_val(side)
-    for name in ['nms_0.6', 'sahi_2x2']:
-        preds = EXPERIMENTS[name](list(factors))
-        preds = {q: [(c, s, x * factors[q], y * factors[q], w * factors[q], h * factors[q]) for c, s, x, y, w, h in dets]
-                 for q, dets in preds.items()}
-        rows.append({'side': side, 'exp': name, **coco_eval(preds, verbose=False)})
-        sim_table = pd.DataFrame(rows)
-        sim_table.to_csv(f'{WORK}/resolution_check.csv', index=False)
-    shutil.rmtree(f'{WORK}/val_sim/{side}')
-shutil.rmtree(f'{WORK}/val_sim')
-display(sim_table.pivot(index='side', columns='exp', values=['mAP', 'AP50', 'AP_small']))
+if RUN_SIM:
+    rows = []
+    for side in SIM_SIDES:
+        factors = downscaled_val(side)
+        for name in ['nms_0.6', 'sahi_2x2']:
+            preds = EXPERIMENTS[name](list(factors))
+            preds = {q: [(c, s, x * factors[q], y * factors[q], w * factors[q], h * factors[q]) for c, s, x, y, w, h in dets]
+                     for q, dets in preds.items()}
+            rows.append({'side': side, 'exp': name, **coco_eval(preds, verbose=False)})
+            sim_table = pd.DataFrame(rows)
+            sim_table.to_csv(f'{WORK}/resolution_check.csv', index=False)
+        shutil.rmtree(f'{WORK}/val_sim/{side}')
+    shutil.rmtree(f'{WORK}/val_sim')
+    display(sim_table.pivot(index='side', columns='exp', values=['mAP', 'AP50', 'AP_small']))
 
 # %% Submission with SAHI only on large frames (test_images.csv has width/height)
 if SAHI_MIN_SIDE:
@@ -188,3 +191,27 @@ if SAHI_MIN_SIDE:
     test_preds = {**EXPERIMENTS['nms_0.6'](test.path[~big].tolist()), **EXPERIMENTS['sahi_2x2'](test.path[big].tolist())}
     pickle.dump(test_preds, open(f'{WORK}/test_preds_sahi_min{SAHI_MIN_SIDE}.pkl', 'wb'))
     write_submission(test_preds)
+
+
+# %% Export for WBF (files are read by Anastasiia's ensemble notebook), FPS as in 02_faster_rcnn.py
+def measure_fps(paths, warmup=10):
+    ims = [cv2.imread(p) for p in paths]
+    kw = dict(imgsz=IMGSZ, conf=0.001, iou=NMS_IOU, max_det=MAX_DET, half=False, verbose=False)
+    for im in ims[:warmup]:
+        model.predict(im, **kw)
+    t = time.time()
+    for im in ims:
+        model.predict(im, **kw)
+    return round(len(ims) / (time.time() - t), 1)
+
+
+if RUN_EXPORT:
+    val_frames, tp = frame_paths('val', VAL_STRIDE), test_paths()
+    tp = tp[:8] if DEBUG else tp
+    for name in ['nms_0.6', 'tta', 'sahi_2x2']:
+        val_preds = EXPERIMENTS[name](val_frames)
+        pickle.dump(val_preds, open(f'{WORK}/val_preds_yolo11s_{name}.pkl', 'wb'))
+        pickle.dump(EXPERIMENTS[name](tp), open(f'{WORK}/test_preds_yolo11s_{name}.pkl', 'wb'))
+        if name == 'nms_0.6':
+            print(name, coco_eval(val_preds, verbose=False))     # must match the baseline: mAP 0.1916
+    print('FPS (batch 1, fp32):', measure_fps(frame_paths('val', 20)[:200]))
