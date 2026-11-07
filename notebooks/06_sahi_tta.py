@@ -19,8 +19,8 @@ NMS_IOU = 0.6
 MAX_DET = 500
 VAL_STRIDE = 50 if DEBUG else 1
 TAG = 'yolo11s_p2'    # weights used in this run: goes into the names of saved predictions
-RUN_BASE = True       # True: full val table of all experiments in EXPERIMENTS
-SUBMIT = None         # name from the val table -> test predictions + submission.csv. Never automatic: val misled us on SAHI
+RUN_BASE = False      # True: full val table (done for yolo11s_p2: sahi_2x2 0.2104, nms_0.6 0.2046)
+SUBMIT = 'sahi_2x2'   # name from the val table -> test predictions + submission.csv. Never automatic: val misled us on SAHI
 RUN_SIM = False       # True: resolution check (done: SAHI wins mAP at all four sides)
 RUN_EXPORT = False    # True: val + test predictions of each method for WBF, FPS
 SIM_STRIDE = 100 if DEBUG else 5   # val frames for the resolution check
@@ -144,8 +144,11 @@ if RUN_BASE:
         table.to_csv(f'{WORK}/inference_experiments.csv', index=False)     # saved after each one
     display(table)
 
-# %% Test predictions for the experiment named in SUBMIT
+# %% Val + test predictions for the experiment named in SUBMIT: both files land in one version for 07_wbf.py
 if SUBMIT:
+    val_preds = EXPERIMENTS[SUBMIT](frame_paths('val', VAL_STRIDE))
+    pickle.dump(val_preds, open(f'{WORK}/val_preds_{TAG}_{SUBMIT}.pkl', 'wb'))
+    print(SUBMIT, coco_eval(val_preds, verbose=False))
     tp = test_paths()
     test_preds = EXPERIMENTS[SUBMIT](tp[:8] if DEBUG else tp)
     pickle.dump(test_preds, open(f'{WORK}/test_preds_{TAG}_{SUBMIT}.pkl', 'wb'))

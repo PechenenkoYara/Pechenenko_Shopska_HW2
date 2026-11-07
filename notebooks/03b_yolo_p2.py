@@ -6,9 +6,10 @@
 
 # %%
 !pip -q install ultralytics pycocotools
-import pickle, time
+import pickle, time, warnings
 import cv2, yaml
 from ultralytics import YOLO
+warnings.filterwarnings('ignore', message='.*get_trial_id.*')   # Ultralytics Ray Tune callback: Kaggle has ray installed, we do not tune
 
 # Same protocol as the baseline. patience only stops a run that stopped improving (best epoch was 8 of 20).
 TRAIN_STRIDE = 5

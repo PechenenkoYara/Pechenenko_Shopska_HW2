@@ -5,12 +5,13 @@
 
 # %%
 !pip -q install ultralytics pycocotools
-import pickle, time
+import pickle, time, warnings
 from pathlib import Path
 import cv2, yaml
 import matplotlib.pyplot as plt
 from ultralytics import RTDETR
 from ultralytics.utils import ROOT as UL_ROOT
+warnings.filterwarnings('ignore', message='.*get_trial_id.*')   # Ultralytics Ray Tune callback: Kaggle has ray installed, we do not tune
 
 # One change per experiment against `baseline`
 EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
