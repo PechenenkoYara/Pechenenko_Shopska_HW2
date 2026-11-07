@@ -1,5 +1,7 @@
 # %% [markdown]
 # 03b — YOLO11 with an extra P2/4 detection head. SCALE='s': one change against 03_yolo_baseline.py; 'm': bigger model.
+# LOSS='nwd': box loss = 0.5 * CIoU loss + 0.5 * NWD loss, one change against the 's' + 'ciou' run.
+# NWD: Wang et al., "A Normalized Gaussian Wasserstein Distance for Tiny Object Detection", arXiv 2110.13389.
 # Why: objects of 13-20 px cover only 2-3 cells on P3/8, a stride-4 map gives them twice the resolution.
 # Kaggle: Accelerator = GPU T4, Internet = ON, Input = competition data. Run common.py as the first cell.
 # Head layout: Ultralytics yolov8-p2.yaml; blocks: Ultralytics yolo11.yaml. Ultralytics ships no YOLO11 P2 config.
@@ -16,9 +18,10 @@ TRAIN_STRIDE = 5
 IMGSZ = 1280
 EPOCHS = 20
 PATIENCE = 6
-SCALE = 'm'           # 's' (done): val 0.2045, public 0.21219
-BATCH = 6             # 's' used 8. If the GPU runs out of memory: 4, and write it in the journal
-RUN = f'yolo11{SCALE}_p2'
+SCALE = 's'           # 's' + 'ciou' (done): val 0.2045, public 0.21219; 'm' + 'ciou' (done): val 0.2079
+LOSS = 'nwd'          # 'ciou' = Ultralytics default
+BATCH = 8             # 'm' used 6. If the GPU runs out of memory: lower it and write it in the journal
+RUN = f'yolo11{SCALE}_p2' + ('' if LOSS == 'ciou' else f'_{LOSS}')
 DEBUG = True          # smoke test: few frames, 1 epoch. Set False for the real run.
 if DEBUG:
     TRAIN_STRIDE, EPOCHS, RUN = 100, 1, RUN + '_debug'
@@ -73,12 +76,60 @@ open(val_list, 'w').write('\n'.join(frame_paths('val', VAL_STRIDE)))
 yaml.safe_dump({'path': WORK, 'train': train_list, 'val': val_list, 'names': dict(enumerate(CLASSES))},
                open(f'{WORK}/data.yaml', 'w'))
 
+# %% NWD box loss. CIoU of a 10 px box drops to ~0 after a 5 px shift, NWD decays smoothly with the distance.
+# Boxes are Gaussians N((cx, cy), diag(w/2, h/2)^2); W2 = ||(cx1, cy1, w1/2, h1/2) - (cx2, cy2, w2/2, h2/2)||; NWD = exp(-W2 / C).
+# C = mean box size, as in the paper; computed in pixels of the 1280 training scale.
+import inspect
+from ultralytics.utils import loss as ul_loss
+
+NWD_RATIO = 0.5
+ds = json.load(open(f'{ROOT}/train/annotations_coco.json'))
+long_side = {im['id']: max(im['width'], im['height']) for im in ds['images']}
+NWD_C = float(np.mean([np.sqrt(a['bbox'][2] * a['bbox'][3]) * IMGSZ / long_side[a['image_id']]
+                       for a in ds['annotations'] if not a.get('iscrowd', 0)]))
+del ds
+print('NWD constant C =', round(NWD_C, 1), 'px')
+
+
+def nwd(b1, b2, c):
+    """NWD between xyxy boxes, shape (N, 4) -> (N,)."""
+    g1 = torch.cat([(b1[:, :2] + b1[:, 2:]) / 2, (b1[:, 2:] - b1[:, :2]) / 2], 1)
+    g2 = torch.cat([(b2[:, :2] + b2[:, 2:]) / 2, (b2[:, 2:] - b2[:, :2]) / 2], 1)
+    return torch.exp(-torch.linalg.norm(g1 - g2, dim=1) / c)
+
+
+_bbox_forward = ul_loss.BboxLoss.forward
+assert 'stride' in inspect.signature(_bbox_forward).parameters, 'BboxLoss.forward has no stride: this Ultralytics version is not supported'
+
+
+def bbox_forward_nwd(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum,
+                     fg_mask, imgsz, stride):
+    """Ultralytics BboxLoss.forward (CIoU + DFL) with the IoU term mixed with NWD. Boxes come in grid units -> x stride."""
+    loss_iou, loss_dfl = _bbox_forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores,
+                                       target_scores_sum, fg_mask, imgsz, stride)
+    b, a = fg_mask.nonzero(as_tuple=True)
+    s = stride[a].float()
+    weight = target_scores[b, a].sum(-1)
+    d = nwd(pred_bboxes[b, a].float() * s, target_bboxes[b, a].float() * s, NWD_C)
+    loss_nwd = ((1.0 - d) * weight).sum() / target_scores_sum
+    bbox_forward_nwd.calls += 1
+    return (1 - NWD_RATIO) * loss_iou + NWD_RATIO * loss_nwd, loss_dfl
+
+
+bbox_forward_nwd.calls = 0
+if LOSS == 'nwd':
+    ul_loss.BboxLoss.forward = bbox_forward_nwd
+    box = torch.tensor([[0., 0., 10., 10.]])
+    print('NWD check: same box', nwd(box, box, NWD_C).item(), '| 5 px shift', round(nwd(box, box + 5, NWD_C).item(), 3))
+
+
 # %% Train: COCO weights go to the backbone and to every head layer with a matching shape
 model = YOLO(model_yaml).load(f'yolo11{SCALE}.pt')
 t0 = time.time()
 model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIENCE, batch=BATCH, seed=SEED,
             deterministic=True, cos_lr=True, close_mosaic=5, workers=4, project=f'{WORK}/runs', name=RUN, exist_ok=True)
 train_min = (time.time() - t0) / 60
+assert LOSS == 'ciou' or bbox_forward_nwd.calls > 0, 'NWD loss was never called'
 best = str(model.trainer.best)
 
 # %% Predictions first: they survive if the session dies during the slow COCO eval
@@ -105,6 +156,6 @@ fps = measure_fps(model, frame_paths('val', 20)[:200])
 
 # %% Proper COCO eval on val
 metrics = coco_eval(val_preds, verbose=False)
-json.dump({'run': RUN, 'best': best, 'train_min': round(train_min, 1), 'fps': fps, **metrics},
+json.dump({'run': RUN, 'loss': LOSS, 'best': best, 'train_min': round(train_min, 1), 'fps': fps, **metrics},
           open(f'{WORK}/results_{RUN}.json', 'w'), indent=1)
 print(RUN, metrics, '| fps', fps, '| train min', round(train_min, 1))
