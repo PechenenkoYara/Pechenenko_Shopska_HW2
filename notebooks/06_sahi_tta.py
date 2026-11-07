@@ -18,9 +18,11 @@ TILE_FRAC = 0.6       # tile side = 60% of the frame side, 2x2 grid -> 20% overl
 NMS_IOU = 0.6
 MAX_DET = 500
 VAL_STRIDE = 50 if DEBUG else 1
-RUN_BASE = False      # True: full val table + submission (done: sahi_2x2 val 0.2032, public 0.16733)
+TAG = 'yolo11s_p2'    # weights used in this run: goes into the names of saved predictions
+RUN_BASE = True       # True: full val table of all experiments in EXPERIMENTS
+SUBMIT = None         # name from the val table -> test predictions + submission.csv. Never automatic: val misled us on SAHI
 RUN_SIM = False       # True: resolution check (done: SAHI wins mAP at all four sides)
-RUN_EXPORT = True     # True: val + test predictions of each method for WBF, FPS
+RUN_EXPORT = False    # True: val + test predictions of each method for WBF, FPS
 SIM_STRIDE = 100 if DEBUG else 5   # val frames for the resolution check
 SIM_SIDES = [680, 960, 1360, 1920] # long sides that exist in test; val has none below 1344
 SAHI_MIN_SIDE = None  # set after the resolution table: SAHI only for test frames with long side >= this
@@ -126,6 +128,8 @@ EXPERIMENTS = {
     'nms_0.7': lambda paths: predict_ultralytics(model, paths, imgsz=IMGSZ, iou=0.7),
     'tta': predict_tta,
     'sahi_2x2': predict_sahi,
+    'imgsz_1600': lambda paths: predict_ultralytics(model, paths, imgsz=1600, iou=0.6, bs=8),
+    'imgsz_1920': lambda paths: predict_ultralytics(model, paths, imgsz=1920, iou=0.6, bs=4),
 }
 if RUN_BASE:
     val_frames = frame_paths('val', VAL_STRIDE)
@@ -134,19 +138,17 @@ if RUN_BASE:
         t = time.time()
         preds = fn(val_frames)
         ms = (time.time() - t) / len(val_frames) * 1000
-        pickle.dump(preds, open(f'{WORK}/val_preds_{name}.pkl', 'wb'))     # kept for WBF
+        pickle.dump(preds, open(f'{WORK}/val_preds_{TAG}_{name}.pkl', 'wb'))     # kept for WBF
         rows.append({'exp': name, **coco_eval(preds, verbose=False), 'ms_per_frame': round(ms, 1)})
         table = pd.DataFrame(rows)
         table.to_csv(f'{WORK}/inference_experiments.csv', index=False)     # saved after each one
     display(table)
 
-# %% Test predictions for the experiment with the best val mAP (changed: see resolution check below)
-if RUN_BASE:
-    SUBMIT = table.sort_values('mAP').exp.iloc[-1]
-    print('submitting:', SUBMIT)
+# %% Test predictions for the experiment named in SUBMIT
+if SUBMIT:
     tp = test_paths()
     test_preds = EXPERIMENTS[SUBMIT](tp[:8] if DEBUG else tp)
-    pickle.dump(test_preds, open(f'{WORK}/test_preds_{SUBMIT}.pkl', 'wb'))
+    pickle.dump(test_preds, open(f'{WORK}/test_preds_{TAG}_{SUBMIT}.pkl', 'wb'))
     write_submission(test_preds)
 
 
@@ -210,8 +212,8 @@ if RUN_EXPORT:
     tp = tp[:8] if DEBUG else tp
     for name in ['nms_0.6', 'tta', 'sahi_2x2']:
         val_preds = EXPERIMENTS[name](val_frames)
-        pickle.dump(val_preds, open(f'{WORK}/val_preds_yolo11s_{name}.pkl', 'wb'))
-        pickle.dump(EXPERIMENTS[name](tp), open(f'{WORK}/test_preds_yolo11s_{name}.pkl', 'wb'))
+        pickle.dump(val_preds, open(f'{WORK}/val_preds_{TAG}_{name}.pkl', 'wb'))
+        pickle.dump(EXPERIMENTS[name](tp), open(f'{WORK}/test_preds_{TAG}_{name}.pkl', 'wb'))
         if name == 'nms_0.6':
-            print(name, coco_eval(val_preds, verbose=False))     # must match the baseline: mAP 0.1916
+            print(name, coco_eval(val_preds, verbose=False))
     print('FPS (batch 1, fp32):', measure_fps(frame_paths('val', 20)[:200]))

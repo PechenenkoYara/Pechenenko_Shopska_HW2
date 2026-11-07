@@ -1,5 +1,5 @@
 # %% [markdown]
-# 03b — YOLO11s with an extra P2/4 detection head (one change against 03_yolo_baseline.py).
+# 03b — YOLO11 with an extra P2/4 detection head. SCALE='s': one change against 03_yolo_baseline.py; 'm': bigger model.
 # Why: objects of 13-20 px cover only 2-3 cells on P3/8, a stride-4 map gives them twice the resolution.
 # Kaggle: Accelerator = GPU T4, Internet = ON, Input = competition data. Run common.py as the first cell.
 # Head layout: Ultralytics yolov8-p2.yaml; blocks: Ultralytics yolo11.yaml. Ultralytics ships no YOLO11 P2 config.
@@ -15,8 +15,9 @@ TRAIN_STRIDE = 5
 IMGSZ = 1280
 EPOCHS = 20
 PATIENCE = 6
-BATCH = 8             # if the GPU runs out of memory: 6, and write it in the journal
-RUN = 'yolo11s_p2'
+SCALE = 'm'           # 's' (done): val 0.2045, public 0.21219
+BATCH = 6             # 's' used 8. If the GPU runs out of memory: 4, and write it in the journal
+RUN = f'yolo11{SCALE}_p2'
 DEBUG = True          # smoke test: few frames, 1 epoch. Set False for the real run.
 if DEBUG:
     TRAIN_STRIDE, EPOCHS, RUN = 100, 1, RUN + '_debug'
@@ -27,6 +28,7 @@ P2_YAML = """
 nc: 80
 scales:
   s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
 backbone:
   - [-1, 1, Conv, [64, 3, 2]]            # 0-P1/2
   - [-1, 1, Conv, [128, 3, 2]]           # 1-P2/4
@@ -60,7 +62,7 @@ head:
   - [-1, 2, C3k2, [1024, True]]          # 28 (P5/32)
   - [[19, 22, 25, 28], 1, Detect, [nc]]
 """
-model_yaml = f'{WORK}/yolo11s-p2.yaml'
+model_yaml = f'{WORK}/yolo11{SCALE}-p2.yaml'
 open(model_yaml, 'w').write(P2_YAML)
 
 # %% Dataset config (same frames as the baseline)
@@ -71,7 +73,7 @@ yaml.safe_dump({'path': WORK, 'train': train_list, 'val': val_list, 'names': dic
                open(f'{WORK}/data.yaml', 'w'))
 
 # %% Train: COCO weights go to the backbone and to every head layer with a matching shape
-model = YOLO(model_yaml).load('yolo11s.pt')
+model = YOLO(model_yaml).load(f'yolo11{SCALE}.pt')
 t0 = time.time()
 model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIENCE, batch=BATCH, seed=SEED,
             deterministic=True, cos_lr=True, close_mosaic=5, workers=4, project=f'{WORK}/runs', name=RUN, exist_ok=True)
@@ -80,10 +82,10 @@ best = str(model.trainer.best)
 
 # %% Predictions first: they survive if the session dies during the slow COCO eval
 model = YOLO(best)
-val_preds = predict_ultralytics(model, frame_paths('val', VAL_STRIDE), imgsz=IMGSZ, bs=16)
+val_preds = predict_ultralytics(model, frame_paths('val', VAL_STRIDE), imgsz=IMGSZ, bs=8)
 pickle.dump(val_preds, open(f'{WORK}/val_preds_{RUN}.pkl', 'wb'))
 tp = test_paths()
-test_preds = predict_ultralytics(model, tp[:64] if DEBUG else tp, imgsz=IMGSZ, bs=16)
+test_preds = predict_ultralytics(model, tp[:64] if DEBUG else tp, imgsz=IMGSZ, bs=8)
 pickle.dump(test_preds, open(f'{WORK}/test_preds_{RUN}.pkl', 'wb'))
 write_submission(test_preds)
 
