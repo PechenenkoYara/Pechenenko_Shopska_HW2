@@ -12,10 +12,10 @@ from itertools import product
 
 DEBUG = True          # smoke test: 2 val clips, 2 test clips
 SRC = 'yolo11s_p2'    # model to rescore: val_preds_<SRC>.pkl, or <SRC>/val_preds.pkl (Anastasiia's format, e.g. 'wbf')
-KS = [1, 2]           # neighbour frames on each side
-IOU_THRS = [0.3, 0.5] # same-class IoU to count as "the same object"; tiny boxes shift a lot, so 0.3 is included
-ALPHAS = [0.2, 0.4, 0.6]
-TOP_K = 300           # boxes kept per frame (max 180 GT objects per frame), lowers the cost of IoU matrices
+KS = [2, 3]           # neighbour frames on each side (yolo11m_p2 grid: k=2 > k=1)
+IOU_THRS = [0.5]      # same-class IoU to count as "the same object" (yolo11m_p2 grid: 0.5 > 0.3)
+ALPHAS = [0.1, 0.2, 0.3]  # yolo11m_p2 grid: 0.2 best, 0.4+ hurts
+TOP_K = 500           # boxes kept per frame = leaderboard limit (300 cost 0.0013 mAP on yolo11m_p2)
 
 
 def find_preds(name):
@@ -26,7 +26,8 @@ def find_preds(name):
             test = hits[0].replace('val_preds', 'test_preds')
             assert os.path.exists(test), f'{test} missing: val and test must come from the same run'
             return hits[0], test
-    raise FileNotFoundError(f'no val predictions for {name} in /kaggle/input')
+    found = sorted(glob.glob('/kaggle/input/**/val_preds*.pkl', recursive=True))
+    raise FileNotFoundError(f'no val predictions for {name} in /kaggle/input; found: {found or "none (add the notebook via Add Input)"}')
 
 
 def load_preds(path, top_k=TOP_K):
