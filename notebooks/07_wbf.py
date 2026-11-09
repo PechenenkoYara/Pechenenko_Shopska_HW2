@@ -16,18 +16,20 @@ import pickle, itertools, time, contextlib, io
 from ensemble_boxes import weighted_boxes_fusion
 
 DEBUG = True              # smoke test: few val frames, 16 test frames
-USE = ['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2', 'retina_focal']   # SEARCH tries all subsets of these
+USE = ['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2_nms_0.6', 'retina_focal']   # SEARCH tries all subsets of these
+# SEARCH result (quick val, search_quick_val.csv): best subset rtdetr + frcnn_short + yolo11s_p2, IoU 0.7 > 0.6 > 0.5,
+# weights [2, 1, 1] (2x the strongest model) -> quick val 0.3146 vs RT-DETR alone 0.2981; adding retina_focal lowers mAP.
+# Full val: search_best 0.3095 (RT-DETR alone 0.2934), public 0.3155 -> final submission (with RT-DETR alone, public 0.2968).
 SEARCH = True             # search subsets / IoU / weights on quick val and export the best one as 'search_best'
 MANUAL = [                # extra settings: full val metrics + own submission for each (val ranks model families unreliably)
-    dict(tag='frcnn_retina_p2_eq', models=['frcnn_short', 'retina_focal', 'yolo11s_p2'], weights=[1, 1, 1], iou=0.7),
-    dict(tag='frcnn_retina_p2x2',  models=['frcnn_short', 'retina_focal', 'yolo11s_p2'], weights=[1, 1, 2], iou=0.7),
-    dict(tag='detr_frcnn_p2_eq',   models=['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2'], weights=[1, 1, 1], iou=0.7),
-    dict(tag='detr2_frcnn_p2',     models=['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2'], weights=[2, 1, 1], iou=0.7),
-    dict(tag='detr_frcnn_p2_p2m',  models=['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2', 'yolo11m_p2'], weights=[1, 1, 1, 1], iou=0.7),
+    dict(tag='detr_frcnn_p2_eq',  models=['rtdetr_l_fixwarmup', 'frcnn_short', 'yolo11s_p2_nms_0.6'],
+         weights=[1, 1, 1], iou=0.7),   # equal weights: full val 0.2991
+    dict(tag='frcnn_retina_p2x2', models=['frcnn_short', 'retina_focal', 'yolo11s_p2_nms_0.6'],
+         weights=[1, 1, 2], iou=0.7),   # best without RT-DETR: full val 0.2515, public 0.2503
 ]
 IOU_THRS = [0.5, 0.6, 0.7]  # WBF matching IoU, searched for the best subset
 SKIP_THR = 0.01           # drop boxes below this score before fusion (speed; they barely affect mAP)
-TOP_K = 300               # keep the top-K boxes per model and frame before fusion (max is 180 GT objects per frame)
+TOP_K = 500               # keep the top-K boxes per model and frame before fusion (= leaderboard limit; 300 cost ~0.0013 mAP)
 CONF_TYPE = 'avg'         # 'avg': a box found by only one of N models gets its score scaled down
 QUICK_STRIDE = 50 if DEBUG else 10
 OUT = f'{WORK}/wbf'
@@ -134,7 +136,7 @@ pd.DataFrame(rows).to_csv(f'{OUT}/search_quick_val.csv', index=False)
 
 # %% Full val + test for every setting -> wbf/<tag>/{results.json, val_preds.pkl, test_preds.pkl, submission.csv}
 # Quick val was used for the search, so full-val numbers of 'search_best' are slightly optimistic.
-full_frames = [k for k in sorted(SIZE) if k in VAL[names[0]]]
+full_frames = quick if DEBUG else [k for k in sorted(SIZE) if k in VAL[names[0]]]   # DEBUG: quick frames only
 test_frames = [key(p) for p in test_paths()]
 TEST = {}
 summary = []
