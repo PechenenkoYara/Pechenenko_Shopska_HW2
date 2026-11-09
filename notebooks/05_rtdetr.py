@@ -18,7 +18,9 @@ EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
                'fixwarmup': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0),   # baseline + bias warmup fix (see train cell)
                'q500': dict(nq=500, lr0=1e-4),
                'fixwarmup_q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),   # fixwarmup + 500 queries (up to 180 GT/frame)
-               'lr5e-5': dict(nq=300, lr0=5e-5)}
+               'lr5e-5': dict(nq=300, lr0=5e-5),
+               # Loss experiment: no denoising queries -> no auxiliary DN loss (RT-DETR default nd=100; DN-DETR, Li et al. 2022)
+               'fixwarmup_nodn': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, nd=0)}
 EXP = 'fixwarmup'
 TRAIN_STRIDE = 5
 IMGSZ = 1280
@@ -53,6 +55,16 @@ def build_model(nq):
 
 # %% Train. optimizer=auto would pick lr 0.00083, too high for a DETR. deterministic=True does not support F.grid_sample.
 model = build_model(cfg['nq'])
+
+# The trainer rebuilds the model from yaml and loads our weights, so the head is changed in a callback on trainer.model.
+# RTDETRDecoder.num_denoising -> ops.get_cdn_group returns no DN queries -> RTDETRDetectionLoss sets *_dn losses to 0.
+def set_denoising(trainer):
+    head = getattr(trainer.model, 'module', trainer.model).model[-1]
+    head.num_denoising = cfg['nd']
+    print('num_denoising =', head.num_denoising)
+
+if 'nd' in cfg:
+    model.add_callback('on_pretrain_routine_end', set_denoising)
 t0 = time.time()
 model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIENCE, batch=BATCH, seed=SEED,
             optimizer='AdamW', lr0=cfg['lr0'], weight_decay=1e-4, deterministic=False, cos_lr=True, close_mosaic=5,
@@ -62,6 +74,7 @@ model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIE
             warmup_bias_lr=cfg.get('warmup_bias_lr', 0.1))
 train_min = (time.time() - t0) / 60
 best = str(model.trainer.best)
+assert 'nd' not in cfg or getattr(model.trainer.model, 'module', model.trainer.model).model[-1].num_denoising == cfg['nd']
 
 # %% Predictions first: they survive if the session dies during the slow COCO eval
 model = RTDETR(best)
