@@ -14,27 +14,17 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_image, ImageReadMode
 from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, FasterRCNN_ResNet50_FPN_V2_Weights
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.anchor_utils import AnchorGenerator
 
-# %% Config. Fixed protocol: every 5th train frame, full val/, long side 1280, seed 42.
-# Defaults below = tuned model (frcnn_short). Each experiment changed ONE knob vs frcnn_short (val mAP, full val/):
-#   frcnn_baseline: EPOCHS=20, LR_STEPS=[16, 19], EVAL_EVERY=5, last epoch  -> 0.1924, val peaked at epoch 5 then overfit
-#   frcnn_short:    EPOCHS=8,  LR_STEPS=[5, 7], best epoch by quick val     -> 0.2273 (tuned)
-#   frcnn_anchors:  + ANCHOR_SIZES=(16, 32, 64, 128, 256)                   -> 0.2177, AP_small unchanged
-#   frcnn_giou:     + BOX_LOSS='giou'                                       -> 0.2234, within noise
-#   frcnn_mask:     + MASK_IGNORE=True                                      -> 0.2158
-RUN = 'frcnn_short'
+# %% Config. Fixed protocol: every 5th train frame, full val/, long side 1280, 20 epochs, seed 42.
+RUN = 'frcnn_baseline'
 TRAIN_STRIDE, VAL_STRIDE = 5, 1
-EPOCHS = 8
+EPOCHS = 20
 BATCH = 4                 # T4 16 GB with AMP; use 2 on CUDA OOM
 LR = 0.005                # reference recipe: 0.02 for 16 images -> linear scaling to batch 4
-LR_STEPS = [5, 7]         # step decay x0.1 at these epochs
+LR_STEPS = [16, 19]       # step decay x0.1 at these epochs (tuning knob: cosine schedule)
 WARMUP_ITERS = 500
-ANCHOR_SIZES = None       # None = torchvision default (32, 64, 128, 256, 512), one size per FPN level
-BOX_LOSS = 'smooth_l1'    # RoI head box loss: 'smooth_l1' (torchvision default) or 'giou'
-GIOU_WEIGHT = 10.0        # as in MMDetection faster_rcnn_r50_fpn_giou_1x (loss_weight=10)
 MASK_IGNORE = False       # data experiment: fill ignored regions with gray 114 on train images
-EVAL_EVERY = 1            # quick val mAP (every 10th val frame) each epoch -> curve + best checkpoint
+EVAL_EVERY = 5            # quick val mAP (every 10th val frame) for the training curve
 RESUME = None             # path to a last.pt from a previous run (Kaggle sessions stop after 12 h)
 USE_WANDB = False
 DEBUG = True              # smoke test: ~250 train frames, 1 epoch, 57 val frames, 16 test frames
@@ -46,7 +36,7 @@ os.makedirs(OUT, exist_ok=True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 AMP = DEVICE.type == 'cuda'
 CFG = dict(run=RUN, train_stride=TRAIN_STRIDE, epochs=EPOCHS, batch=BATCH, lr=LR, lr_steps=LR_STEPS,
-           warmup=WARMUP_ITERS, anchors=ANCHOR_SIZES, box_loss=BOX_LOSS, mask_ignore=MASK_IGNORE, seed=SEED)
+           warmup=WARMUP_ITERS, mask_ignore=MASK_IGNORE, seed=SEED)
 
 # %% Annotations from annotations_coco.json.
 # category_id is 1-based, which is exactly torchvision's convention (label 0 = background).
@@ -97,30 +87,6 @@ class VisDroneDet(Dataset):
 def collate(batch):
     return tuple(zip(*batch))
 
-# %% GIoU box loss for the RoI head (Rezatofighi et al., CVPR 2019).
-# torchvision's fastrcnn_loss gets only encoded deltas, not the proposals. Decoding a delta against a unit
-# reference box differs from decoding against the real proposal by an affine map (shift + per-axis scale),
-# which leaves IoU and GIoU unchanged, so GIoU can be computed from deltas alone.
-import torch.nn.functional as F
-import torchvision.models.detection.roi_heads as tv_roi_heads
-from torchvision.ops import generalized_box_iou_loss
-
-def _decode_unit(d, wts=(10., 10., 5., 5.), clip=math.log(1000. / 16)):
-    dx, dy = d[:, 0] / wts[0], d[:, 1] / wts[1]
-    w, h = (d[:, 2] / wts[2]).clamp(max=clip).exp(), (d[:, 3] / wts[3]).clamp(max=clip).exp()
-    return torch.stack([dx - w / 2, dy - h / 2, dx + w / 2, dy + h / 2], 1)
-
-def fastrcnn_loss_giou(class_logits, box_regression, labels, regression_targets):
-    labels, regression_targets = torch.cat(labels, 0), torch.cat(regression_targets, 0)
-    loss_cls = F.cross_entropy(class_logits, labels)
-    pos = torch.where(labels > 0)[0]
-    box_regression = box_regression.reshape(class_logits.shape[0], -1, 4)[pos, labels[pos]]
-    loss_box = generalized_box_iou_loss(_decode_unit(box_regression.float()),
-                                        _decode_unit(regression_targets[pos].float()), reduction='sum')
-    return loss_cls, GIOU_WEIGHT * loss_box / labels.numel()   # same normalisation as torchvision
-
-_fastrcnn_loss_default = tv_roi_heads.fastrcnn_loss
-
 # %% Model. Resize: frames are 16:9, so min_size=720 / max_size=1280 gives long side 1280 (same scale as YOLO).
 def build_model():
     m = fasterrcnn_resnet50_fpn_v2(
@@ -132,9 +98,6 @@ def build_model():
     )
     in_f = m.roi_heads.box_predictor.cls_score.in_features
     m.roi_heads.box_predictor = FastRCNNPredictor(in_f, len(CLASSES) + 1)   # new head: 8 classes + bg
-    tv_roi_heads.fastrcnn_loss = fastrcnn_loss_giou if BOX_LOSS == 'giou' else _fastrcnn_loss_default
-    if ANCHOR_SIZES:   # same 3 aspect ratios per level -> RPN head shapes unchanged, pretrained weights still load
-        m.rpn.anchor_generator = AnchorGenerator(tuple((s,) for s in ANCHOR_SIZES), ((0.5, 1.0, 2.0),) * 5)
     return m.to(DEVICE)
 
 # %% Prediction in the shared format {path: [(cls0, score, x, y, w, h), ...]}.
@@ -190,13 +153,12 @@ def lr_factor(it):
 
 sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_factor)
 scaler = torch.amp.GradScaler('cuda', enabled=AMP)
-start_epoch, history, best_map = 0, [], -1.0
+start_epoch, history = 0, []
 if RESUME:
     ck = torch.load(RESUME, map_location=DEVICE)
     model.load_state_dict(ck['model']); opt.load_state_dict(ck['opt'])
     sched.load_state_dict(ck['sched']); scaler.load_state_dict(ck['scaler'])
     start_epoch, history = ck['epoch'] + 1, ck['history']
-    best_map = max([h.get('val_quick_mAP', -1) for h in history] + [-1])
 
 if USE_WANDB:
     import wandb
@@ -225,9 +187,6 @@ for epoch in range(start_epoch, EPOCHS):
            **{k: round(v, 4) for k, v in sums.items()}}
     if (epoch + 1) % EVAL_EVERY == 0 or epoch + 1 == EPOCHS:
         rec['val_quick_mAP'] = coco_eval(predict_frcnn(model, val_quick), verbose=False)['mAP']
-        if rec['val_quick_mAP'] > best_map:     # keep the best epoch (same idea as Ultralytics best.pt)
-            best_map = rec['val_quick_mAP']
-            torch.save(model.state_dict(), f'{OUT}/best.pt')
     history.append(rec)
     print(rec)
     if USE_WANDB: wandb.log(rec)
@@ -235,13 +194,10 @@ for epoch in range(start_epoch, EPOCHS):
                 'scaler': scaler.state_dict(), 'epoch': epoch, 'history': history}, f'{OUT}/last.pt')
 train_min = round((time.time() - t_train) / 60, 1)
 
-# %% Full validation of the best epoch: mAP / AP50 / AP_small + FPS (numbers for the report table)
-model.load_state_dict(torch.load(f'{OUT}/best.pt', map_location=DEVICE))
-best_epoch = max(history, key=lambda h: h.get('val_quick_mAP', -1))['epoch']
-print('best epoch:', best_epoch)
+# %% Full validation: mAP / AP50 / AP_small + FPS (numbers for the report table)
 val_preds = predict_frcnn(model, val_paths)
 metrics = coco_eval(val_preds)
-metrics.update(fps=measure_fps(model, val_paths), train_min=train_min, best_epoch=best_epoch)
+metrics.update(fps=measure_fps(model, val_paths), train_min=train_min)
 print(RUN, metrics)
 json.dump({'config': CFG, 'metrics': metrics, 'history': history}, open(f'{OUT}/results.json', 'w'), indent=1)
 pickle.dump(val_preds, open(f'{OUT}/val_preds.pkl', 'wb'))       # reused for failure cases and WBF
