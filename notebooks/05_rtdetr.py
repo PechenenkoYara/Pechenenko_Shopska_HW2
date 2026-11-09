@@ -17,6 +17,7 @@ warnings.filterwarnings('ignore', message='.*get_trial_id.*')   # Ultralytics Ra
 EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
                'fixwarmup': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0),   # baseline + bias warmup fix (see train cell)
                'q500': dict(nq=500, lr0=1e-4),
+               'fixwarmup_q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),   # fixwarmup + 500 queries (up to 180 GT/frame)
                'lr5e-5': dict(nq=300, lr0=5e-5)}
 EXP = 'fixwarmup'
 TRAIN_STRIDE = 5

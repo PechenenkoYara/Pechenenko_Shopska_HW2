@@ -21,7 +21,8 @@ VAL_STRIDE = 50 if DEBUG else 1
 TAG = 'yolo11s_p2'    # weights used in this run: goes into the names of saved predictions
 RUN_BASE = False      # True: full val table (done for yolo11s_p2: sahi_2x2 0.2104, nms_0.6 0.2046)
 SUBMIT = 'nms_0.6'   # name from the val table -> val + test predictions + submission.csv. Never automatic: val misled us on SAHI
-                      # 'nms_0.6' = plain yolo11s_p2 (val 0.2046) for 07_wbf.py; 'sahi_2x2' was submitted: public 0.20267
+                      # 'nms_0.6' = plain yolo11s_p2 (val 0.2046) for 07_wbf.py. SAHI lost on public twice: P2 0.20267 vs 0.21219 without SAHI,
+                      # baseline 0.16733 vs 0.17329, although it won on val (0.2104 vs 0.2046)
 RUN_SIM = False       # True: resolution check (done: SAHI wins mAP at all four sides)
 RUN_EXPORT = False    # True: val + test predictions of each method for WBF, FPS
 SIM_STRIDE = 100 if DEBUG else 5   # val frames for the resolution check
@@ -44,8 +45,11 @@ def find_weights():
     return out
 
 model = YOLO(find_weights())
-# yolo11s-p2 has ~10M parameters, yolo11m-p2 ~20M+: a wrong Input version would silently mislabel predictions as TAG
-print('weights:', find_weights(), '|', round(sum(p.numel() for p in model.model.parameters()) / 1e6, 1), 'M params')
+# A wrong Input version would silently mislabel predictions as TAG. P2 head -> strides [4, 8, 16, 32] (plain: [8, 16, 32]);
+# yolo11s ~10M parameters, yolo11m ~20M+.
+print('weights:', find_weights(), '| strides', model.model.stride.int().tolist(), '|',
+      round(sum(p.numel() for p in model.model.parameters()) / 1e6, 1), 'M params')
+assert ('p2' not in TAG) == (model.model.stride.min() >= 8), f'TAG={TAG} does not match the loaded weights'
 half = torch.cuda.is_available()
 
 # %% TTA (Ultralytics): flips and scales inside model.predict
