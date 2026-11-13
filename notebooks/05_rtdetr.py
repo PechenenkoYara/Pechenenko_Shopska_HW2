@@ -21,7 +21,7 @@ EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
                'lr5e-5': dict(nq=300, lr0=5e-5),                                 # not run
                # Loss experiment: no denoising queries -> no auxiliary DN loss (RT-DETR default nd=100; DN-DETR, Li et al. 2022).
                # Kaggle T4, best epoch 10, stopped at 16 (patience 6): mAP 0.2969 (fixwarmup 0.2934), AP_small 0.1107 (0.1385),
-               # AP_large 0.4975 (0.4904), public 0.30325 (fixwarmup 0.29676), 246 min -> DN helps small objects and the first epochs.
+               # AP_large 0.4975 (0.4904), public 0.30325 (fixwarmup 0.29677), 246 min -> DN helps small objects and the first epochs.
                'fixwarmup_nodn': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, nd=0),
                # Loss experiment: GIoU weight 2 -> 4 in the loss and the matching cost (loss cell). Trained on Colab T4, stopped
                # after 8/20 epochs by the Colab GPU limit; evaluated in 05b_rtdetr_eval_checkpoint.py: mAP 0.2928 (fixwarmup
@@ -93,7 +93,8 @@ model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIE
             optimizer='AdamW', lr0=cfg['lr0'], weight_decay=1e-4, deterministic=False, cos_lr=True, close_mosaic=5,
             workers=4, project=f'{WORK}/runs', name=RUN, exist_ok=True,
             # Ultralytics default warmup_bias_lr=0.1 is meant for SGD on YOLO. With AdamW (lr 1e-4) it gave all biases
-            # ~700x the weight LR for 2 epochs (results.csv lr/pg2 0.067 vs lr/pg0 3.3e-5): cls_loss ~0 and mAP 0 for 12 epochs.
+            # ~2000x (epoch 1) and ~500x (epoch 2) the weight LR (results.csv lr/pg2 0.067 vs lr/pg0 3.3e-5, then 0.033 vs 6.6e-5):
+            # cls_loss ~0 and mAP 0 for 12 epochs.
             warmup_bias_lr=cfg.get('warmup_bias_lr', 0.1))
 train_min = (time.time() - t0) / 60
 print('loss gains used in training:', model.trainer.model.criterion.loss_gain)   # should show giou = GIOU_GAIN
