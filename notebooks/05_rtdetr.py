@@ -13,15 +13,18 @@ from ultralytics import RTDETR
 from ultralytics.utils import ROOT as UL_ROOT
 warnings.filterwarnings('ignore', message='.*get_trial_id.*')   # Ultralytics Ray Tune callback: Kaggle has ray installed, we do not tune
 
-# One change per experiment. baseline = Ultralytics defaults; after the warmup fix, experiments change one knob vs fixwarmup.
+# One change per experiment. baseline = Ultralytics defaults; fixwarmup_* and giou4 = fixwarmup + one change.
 EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
-               'fixwarmup': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0),   # baseline + bias warmup fix (see train cell): 0.2934 (final)
-               # fixwarmup + GIoU weight 2 -> 4 (loss cell). Trained on Colab T4, stopped after 8/20 epochs by the Colab GPU
-               # limit; evaluated in 05b_rtdetr_eval_checkpoint.py: mAP 0.2928 (fixwarmup 0.2934), AP_small 0.1245 (0.1385),
-               # AP_large 0.5030 (0.4904) -> not better overall: helps large boxes, hurts small ones.
-               'giou4': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, giou_gain=4),
-               'q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),     # fixwarmup + 500 queries (up to ~180 objects per frame); not run: no GPU left
-               'lr5e-5': dict(nq=300, lr0=5e-5, warmup_bias_lr=0.0)}   # not run: no GPU left
+               'fixwarmup': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0),   # baseline + bias warmup fix (see train cell): full val 0.2934 (final)
+               'q500': dict(nq=500, lr0=1e-4),
+               'fixwarmup_q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),   # fixwarmup + 500 queries (up to 180 GT/frame)
+               'lr5e-5': dict(nq=300, lr0=5e-5),
+               # Loss experiment: no denoising queries -> no auxiliary DN loss (RT-DETR default nd=100; DN-DETR, Li et al. 2022)
+               'fixwarmup_nodn': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, nd=0),
+               # Loss experiment: GIoU weight 2 -> 4 in the loss and the matching cost (loss cell). Trained on Colab T4, stopped
+               # after 8/20 epochs by the Colab GPU limit; evaluated in 05b_rtdetr_eval_checkpoint.py: mAP 0.2928 (fixwarmup
+               # 0.2934), AP_small 0.1245 (0.1385), AP_large 0.5030 (0.4904) -> not better overall: helps large boxes, hurts small.
+               'giou4': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, giou_gain=4)}
 EXP = 'fixwarmup'
 TRAIN_STRIDE = 5
 IMGSZ = 1280
@@ -71,8 +74,18 @@ RTDETRDetectionModel.init_criterion = init_criterion
 
 # %% Train. optimizer=auto would pick lr 0.00083, too high for a DETR. deterministic=True does not support F.grid_sample.
 model = build_model(cfg['nq'])
-crit = RTDETRDetectionModel.init_criterion(model.model)   # check the override before spending GPU time
+crit = RTDETRDetectionModel.init_criterion(model.model)   # check the GIoU override before spending GPU time
 assert crit.loss_gain['giou'] == crit.matcher.cost_gain['giou'] == GIOU_GAIN
+
+# The trainer rebuilds the model from yaml and loads our weights, so the head is changed in a callback on trainer.model.
+# RTDETRDecoder.num_denoising -> ops.get_cdn_group returns no DN queries -> RTDETRDetectionLoss sets *_dn losses to 0.
+def set_denoising(trainer):
+    head = getattr(trainer.model, 'module', trainer.model).model[-1]
+    head.num_denoising = cfg['nd']
+    print('num_denoising =', head.num_denoising)
+
+if 'nd' in cfg:
+    model.add_callback('on_pretrain_routine_end', set_denoising)
 t0 = time.time()
 model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIENCE, batch=BATCH, seed=SEED,
             optimizer='AdamW', lr0=cfg['lr0'], weight_decay=1e-4, deterministic=False, cos_lr=True, close_mosaic=5,
@@ -83,6 +96,7 @@ model.train(data=f'{WORK}/data.yaml', imgsz=IMGSZ, epochs=EPOCHS, patience=PATIE
 train_min = (time.time() - t0) / 60
 print('loss gains used in training:', model.trainer.model.criterion.loss_gain)   # should show giou = GIOU_GAIN
 best = str(model.trainer.best)
+assert 'nd' not in cfg or getattr(model.trainer.model, 'module', model.trainer.model).model[-1].num_denoising == cfg['nd']
 
 # %% Predictions first: they survive if the session dies during the slow COCO eval
 model = RTDETR(best)
