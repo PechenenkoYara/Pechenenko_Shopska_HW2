@@ -18,8 +18,9 @@ TRAIN_STRIDE = 5
 IMGSZ = 1280
 EPOCHS = 20
 PATIENCE = 6
-SCALE = 's'           # 's' + 'ciou' (done): val 0.2045, public 0.21219; 'm' + 'ciou' (done): val 0.2079
-LOSS = 'nwd'          # 'ciou' = Ultralytics default
+SCALE = 's'           # 's' + 'ciou' (done): val 0.2045, AP_small 0.1138, public 0.21219, 161.8 min, 20 FPS
+                      # 'm' + 'ciou' (done): val 0.2079, AP_small 0.1009, 169.5 min, 9.7 FPS (stopped at 10 by patience)
+LOSS = 'ciou'         # 'ciou' = Ultralytics default; 'nwd' (cell below): implemented and tested on a DEBUG run, not trained (no GPU left)
 BATCH = 8             # 'm' used 6. If the GPU runs out of memory: lower it and write it in the journal
 RUN = f'yolo11{SCALE}_p2' + ('' if LOSS == 'ciou' else f'_{LOSS}')
 DEBUG = True          # smoke test: few frames, 1 epoch. Set False for the real run.

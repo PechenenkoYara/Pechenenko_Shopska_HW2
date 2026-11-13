@@ -16,10 +16,12 @@ warnings.filterwarnings('ignore', message='.*get_trial_id.*')   # Ultralytics Ra
 # One change per experiment. baseline = Ultralytics defaults; fixwarmup_* and giou4 = fixwarmup + one change.
 EXPERIMENTS = {'baseline': dict(nq=300, lr0=1e-4),
                'fixwarmup': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0),   # baseline + bias warmup fix (see train cell): full val 0.2934 (final)
-               'q500': dict(nq=500, lr0=1e-4),
-               'fixwarmup_q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),   # fixwarmup + 500 queries (up to 180 GT/frame)
-               'lr5e-5': dict(nq=300, lr0=5e-5),
-               # Loss experiment: no denoising queries -> no auxiliary DN loss (RT-DETR default nd=100; DN-DETR, Li et al. 2022)
+               'q500': dict(nq=500, lr0=1e-4),                                   # not run (broken warmup, see fixwarmup)
+               'fixwarmup_q500': dict(nq=500, lr0=1e-4, warmup_bias_lr=0.0),   # fixwarmup + 500 queries (up to 180 GT/frame): not run, no GPU left
+               'lr5e-5': dict(nq=300, lr0=5e-5),                                 # not run
+               # Loss experiment: no denoising queries -> no auxiliary DN loss (RT-DETR default nd=100; DN-DETR, Li et al. 2022).
+               # Kaggle T4, best epoch 10, stopped at 16 (patience 6): mAP 0.2969 (fixwarmup 0.2934), AP_small 0.1107 (0.1385),
+               # AP_large 0.4975 (0.4904), public 0.30325 (fixwarmup 0.29676), 246 min -> DN helps small objects and the first epochs.
                'fixwarmup_nodn': dict(nq=300, lr0=1e-4, warmup_bias_lr=0.0, nd=0),
                # Loss experiment: GIoU weight 2 -> 4 in the loss and the matching cost (loss cell). Trained on Colab T4, stopped
                # after 8/20 epochs by the Colab GPU limit; evaluated in 05b_rtdetr_eval_checkpoint.py: mAP 0.2928 (fixwarmup

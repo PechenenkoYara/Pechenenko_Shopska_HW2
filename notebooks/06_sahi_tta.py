@@ -1,5 +1,7 @@
 # %% [markdown]
-# 06 — Inference-only experiments on the trained YOLO11s baseline: NMS IoU, TTA, SAHI-style tiling.
+# 06 — Inference-only experiments on trained YOLO weights: NMS IoU, TTA, SAHI-style tiling.
+# Weights (TAG): YOLO11s baseline (03) -> SAHI public 0.16733 vs 0.17329; yolo11s_p2 (03b) -> the table in RUN_BASE,
+# SAHI public 0.20267 vs 0.21219. Default SUBMIT='nms_0.6' on yolo11s_p2 = plain P2 predictions exported for 07_wbf.py.
 # No training, so this costs little GPU quota. Each experiment changes one thing against `nms_0.6`.
 # Kaggle: Accelerator = GPU T4, Internet = ON, Input = competition data + dataset with best.pt.
 # Run common.py as the first cell. Set DEBUG = False for the real run.
